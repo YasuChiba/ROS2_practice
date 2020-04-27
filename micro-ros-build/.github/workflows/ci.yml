@@ -1,0 +1,249 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dashing
+      - crystal
+
+jobs:
+
+  micro_ros_build:
+    runs-on: ubuntu-latest
+    container: ros:${{github.base_ref}}
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: src/micro-ros-build
+
+      - name: dependencies
+        run: |
+          apt update
+          apt install -y python3-colcon-metadata
+          rosdep update
+          rosdep install -y --from-paths src --ignore-src -y
+
+      - name: build
+        run: |
+          . /opt/ros/$ROS_DISTRO/setup.sh
+          colcon build --merge-install
+
+      - name: installation
+        run: |
+            (test -f install/lib/micro_ros_setup/build_firmware.sh) && true || false
+
+      - uses: actions/upload-artifact@v1
+        with:
+          name: micro_ros_build
+          path: install
+
+  agent:
+    runs-on: ubuntu-latest
+    container: ros:${{github.base_ref}}
+    needs: micro_ros_build
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: src/micro-ros-build
+
+      - name: dependencies
+        run: |
+          apt update
+          apt install -y python3-colcon-metadata
+          rosdep update
+          rosdep install -y --from-paths src --ignore-src -y
+
+      - uses: actions/download-artifact@v1
+        with:
+          name: micro_ros_build
+          path: install
+
+      # Workaround https://github.com/actions/upload-artifact/issues/38
+      - run: |
+          chmod +x -R install/lib/micro_ros_setup
+
+      - name: build
+        run: |
+          . /opt/ros/$ROS_DISTRO/setup.sh
+          . install/local_setup.sh
+          ros2 run micro_ros_setup create_agent_ws.sh src
+          colcon build --merge-install
+
+      - name: installation
+        run: |
+            (test -f install/lib/micro_ros_agent/micro_ros_agent) && true || false
+
+  client_host:
+    runs-on: ubuntu-latest
+    container: ros:${{github.base_ref}}
+    needs: micro_ros_build
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: src/micro-ros-build
+
+      - name: dependencies
+        run: |
+          apt update
+          apt install -y python3-colcon-metadata
+          rosdep update
+          rosdep install -y --from-paths src --ignore-src -y
+
+      - uses: actions/download-artifact@v1
+        with:
+          name: micro_ros_build
+          path: install
+
+      # Workaround https://github.com/actions/upload-artifact/issues/38
+      - run: |
+          chmod +x -R install/lib/micro_ros_setup
+          chmod +x install/config/host/generic/*.sh
+
+      # Skip rclc packages due to build fail. Once the issues with rclc are solved will be back to CI.
+      - name: build
+        run: |
+          . /opt/ros/$ROS_DISTRO/setup.sh
+          . install/local_setup.sh
+          ros2 run micro_ros_setup create_firmware_ws.sh host
+          colcon build --merge-install --metas src - --packages-skip rclc micro_ros_demos_rclc rclc_examples
+
+      - name: installation
+        run: |
+          (test -f install/lib/micro_ros_demos_rcl/int32_publisher/int32_publisher)                         && true || false
+          (test -f install/lib/micro_ros_demos_rcl/int32_subscriber/int32_subscriber)                       && true || false
+          (test -f install/lib/micro_ros_demos_rcl/int32_publisher_subscriber/int32_publisher_subscriber)   && true || false
+          (test -f install/lib/micro_ros_demos_rcl/int32_multinode/int32_multinode)                         && true || false
+          (test -f install/lib/micro_ros_demos_rcl/guard_condition/guard_condition)                         && true || false
+          (test -f install/lib/micro_ros_demos_rcl/fibonacci_action_server/fibonacci_action_server)         && true || false
+          (test -f install/lib/micro_ros_demos_rcl/fibonacci_action_client/fibonacci_action_client)         && true || false
+          (test -f install/lib/micro_ros_demos_rcl/configured_subscriber/configured_subscriber)             && true || false
+          (test -f install/lib/micro_ros_demos_rcl/configured_publisher/configured_publisher)               && true || false
+          (test -f install/lib/micro_ros_demos_rcl/addtwoints_server/addtwoints_server)                     && true || false
+          (test -f install/lib/micro_ros_demos_rcl/addtwoints_client/addtwoints_client)                     && true || false
+
+  # Temporary solution due to NuttX is no fully implemented on the generic build system
+  client_nuttx_firmware:
+    runs-on: ubuntu-latest
+    container: microros/ci:${{github.base_ref}}
+    needs: micro_ros_build
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: src/micro-ros-build
+
+      - name: dependencies
+        run: |
+          apt update
+          apt install -y python3-colcon-metadata
+          rosdep update
+          rosdep install -y --from-paths src --ignore-src -y
+
+      - uses: actions/download-artifact@v1
+        with:
+          name: micro_ros_build
+          path: install
+
+      # Workaround https://github.com/actions/upload-artifact/issues/38
+      - run: |
+          chmod +x -R install/lib/micro_ros_setup
+          chmod +x install/config/nuttx/generic/*.sh
+
+      - name: build
+        run: |
+          . /opt/ros/$ROS_DISTRO/setup.sh
+          . install/local_setup.sh
+          ros2 run micro_ros_setup create_firmware_ws.sh nuttx olimex-stm32-e407
+          ros2 run micro_ros_setup configure_firmware.sh uros
+          ros2 run micro_ros_setup build_firmware.sh
+
+      - name: binary
+        run: |
+          (test -f firmware/NuttX/nuttx.bin) && true || false
+  
+  #Build test for FreeRTOS and Zephyr
+  client_firmware:
+    runs-on: ubuntu-latest
+    container: microros/ci:dashing
+    needs: micro_ros_build
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rtos: freertos
+            platform: crazyflie21
+            configuration: crazyflie_position_publisher
+            transport_arguments: -t serial -d /dev/ttyS0
+            binary: 'firmware/freertos_apps/microros_crazyflie21_extensions/cf2.bin'
+
+          - rtos: freertos
+            platform: olimex-stm32-e407
+            configuration: int32_publisher
+            transport_arguments: -t serial -d /dev/ttyS0
+            binary: 'firmware/freertos_apps/microros_olimex_e407_extensions/build/micro-ROS.elf'
+
+          - rtos: zephyr
+            platform: olimex-stm32-e407
+            configuration: int32_publisher
+            transport_arguments: -t serial-usb
+            binary: 'firmware/build/zephyr/zephyr.bin'
+
+          - rtos: zephyr
+            platform: discovery_l475_iot1
+            configuration: int32_publisher
+            transport_arguments: -t serial-usb
+            binary: 'firmware/build/zephyr/zephyr.bin'
+
+          - rtos: zephyr
+            platform: host
+            configuration: host_int32_publisher
+            transport_arguments: -t udp -i 192.168.1.1 -p 8080
+            binary: 'firmware/build/zephyr/zephyr.exe'
+
+          - rtos: raspbian
+            platform: buster_v7
+            configuration: agent_lite
+            binary: 'firmware/bin/micro_ros_agent_lite'
+
+          - rtos: raspbian
+            platform: buster_v7
+            configuration: weather_publisher
+            binary: 'firmware/bin/weather_publisher'
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          path: src/micro-ros-build
+
+      - name: dependencies
+        run: |
+          apt update
+          apt install -y python3-colcon-metadata
+          rosdep update
+          rosdep install -y --from-paths src --ignore-src -y
+
+      - uses: actions/download-artifact@v1
+        with:
+          name: micro_ros_build
+          path: install
+
+      # Workaround https://github.com/actions/upload-artifact/issues/38
+      - run: |
+          chmod +x -R install/lib/micro_ros_setup
+          chmod +x -R install/config
+
+      - name: build
+        run: |
+          . /opt/ros/dashing/setup.sh
+          . install/local_setup.sh
+          ros2 run micro_ros_setup create_firmware_ws.sh ${{ matrix.rtos }} ${{ matrix.platform }}
+          ros2 run micro_ros_setup configure_firmware.sh ${{ matrix.configuration }} ${{ matrix.transport_arguments }} 
+          ros2 run micro_ros_setup build_firmware.sh
+
+      - name: binaries
+        run: |
+          (test -f ${{ matrix.binary }}) && true || false
